@@ -38,7 +38,7 @@ If you did not follow the directions and did not write your revocation code down
 - Select your account from the list to view the current login code, and click `Trade Confirmations` to see pending trade confirmations.
 - For your safety, remember to get Steam Guard backup codes! Follow [this link](https://store.steampowered.com/twofactor/manage) and click "Get Backup Codes," then print out that page and save it in a safe place. You can use these codes if you lose access to your authenticator.
 
-[How to update SDA.](https://github.com/SteamDesktopAuthenticator/SteamDesktopAuthenticator/wiki/Updating)
+[How to update SDA.](https://github.com/Jessecar96/SteamDesktopAuthenticator/wiki/Updating)
 
 [How to use SDA on multiple computers.](https://github.com/Jessecar96/SteamDesktopAuthenticator/wiki/Using-SDA-on-multiple-computers)
 
