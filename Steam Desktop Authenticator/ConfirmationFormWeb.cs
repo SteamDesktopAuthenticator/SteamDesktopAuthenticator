@@ -1,121 +1,179 @@
 ﻿using System;
-using System.IO;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
 using System.Drawing;
-using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using System.Diagnostics;
-using CefSharp;
-using CefSharp.WinForms;
 using SteamAuth;
+using System.Drawing.Drawing2D;
 
 namespace Steam_Desktop_Authenticator
 {
     public partial class ConfirmationFormWeb : Form
     {
-        private readonly ChromiumWebBrowser browser;
-        private string steamCookies;
         private SteamGuardAccount steamAccount;
-        private string tradeID;
 
         public ConfirmationFormWeb(SteamGuardAccount steamAccount)
         {
             InitializeComponent();
             this.steamAccount = steamAccount;
             this.Text = String.Format("Trade Confirmations - {0}", steamAccount.AccountName);
+        }
+        private async Task LoadData()
+        {
+            this.splitContainer1.Panel2.Controls.Clear();
 
-            CefSettings settings = new CefSettings();
-            settings.PersistSessionCookies = false;
-            settings.Locale = "en-US";
-            settings.UserAgent = "Mozilla/5.0 (Linux; Android 6.0; Nexus 6P Build/XXXXX; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/47.0.2526.68 Mobile Safari/537.36";
-            steamCookies = String.Format("mobileClientVersion=0 (2.1.3); mobileClient=android; steamid={0}; steamLogin={1}; steamLoginSecure={2}; Steam_Language=english; dob=;", steamAccount.Session.SteamID.ToString(), steamAccount.Session.SteamLogin, steamAccount.Session.SteamLoginSecure);
-
-            if (!Cef.IsInitialized)
+            // Check for a valid refresh token first
+            if (steamAccount.Session.IsRefreshTokenExpired())
             {
-                Cef.Initialize(settings);
+                MessageBox.Show("Your session has expired. Use the login again button under the selected account menu.", "Trade Confirmations", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                this.Close();
+                return;
             }
 
-            browser = new ChromiumWebBrowser(steamAccount.GenerateConfirmationURL())
+            // Check for a valid access token, refresh it if needed
+            if (steamAccount.Session.IsAccessTokenExpired())
             {
-                Dock = DockStyle.Fill,
-            };
-            this.splitContainer1.Panel2.Controls.Add(browser);
-
-            BrowserRequestHandler handler = new BrowserRequestHandler();
-            handler.Cookies = steamCookies;
-            browser.RequestHandler = handler;
-            browser.AddressChanged += Browser_AddressChanged;
-            browser.LoadingStateChanged += Browser_LoadingStateChanged;
-        }
-
-        private void Browser_LoadingStateChanged(object sender, LoadingStateChangedEventArgs e)
-        {
-            // This looks really ugly, but it's easier than implementing steam's steammobile:// protocol using CefSharp
-            // We override the page's GetValueFromLocalURL() to pass in the keys for sending ajax requests
-            Debug.WriteLine("IsLoading: " + e.IsLoading);
-            if (e.IsLoading == false)
-            {
-                // Generate url for details
-                string urlParams = steamAccount.GenerateConfirmationQueryParams("details" + tradeID);
-
-                var script = string.Format(@"window.GetValueFromLocalURL = 
-                function(url, timeout, success, error, fatal) {{            
-                    console.log(url);
-                    if(url.indexOf('steammobile://steamguard?op=conftag&arg1=allow') !== -1) {{
-                        // send confirmation (allow)
-                        success('{0}');
-                    }} else if(url.indexOf('steammobile://steamguard?op=conftag&arg1=cancel') !== -1) {{
-                        // send confirmation (cancel)
-                        success('{1}');
-                    }} else if(url.indexOf('steammobile://steamguard?op=conftag&arg1=details') !== -1) {{
-                        // get details
-                        success('{2}');
-                    }}
-                }}", steamAccount.GenerateConfirmationQueryParams("allow"), steamAccount.GenerateConfirmationQueryParams("cancel"), urlParams);
                 try
                 {
-                    browser.ExecuteScriptAsync(script);
+                    await steamAccount.Session.RefreshAccessToken();
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    Debug.WriteLine("Failed to execute script");
+                    MessageBox.Show(ex.Message, "Steam Login Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    this.Close();
+                    return;
                 }
             }
-        }
 
-        private void Browser_AddressChanged(object sender, AddressChangedEventArgs e)
-        {
-            string[] urlparts = browser.Address.Split('#');
-            if (urlparts.Length > 1)
+            try
             {
-                tradeID = urlparts[1].Replace("conf_", "");
+                var confirmations = await steamAccount.FetchConfirmationsAsync();
+
+                if (confirmations == null || confirmations.Length == 0)
+                {
+                    Label errorLabel = new Label() { Text = "Nothing to confirm/cancel", AutoSize = true, ForeColor = Color.Black, Location = new Point(150, 20) };
+                    this.splitContainer1.Panel2.Controls.Add(errorLabel);
+                }
+
+                foreach (var confirmation in confirmations)
+                {
+                    Panel panel = new Panel() { Dock = DockStyle.Top, Height = 120 };
+                    panel.Paint += (s, e) =>
+                    {
+                        using (LinearGradientBrush brush = new LinearGradientBrush(panel.ClientRectangle, Color.Black, Color.DarkCyan, 90F))
+                        {
+                            e.Graphics.FillRectangle(brush, panel.ClientRectangle);
+                        }
+                    };
+
+                    if (!string.IsNullOrEmpty(confirmation.Icon))
+                    {
+                        PictureBox pictureBox = new PictureBox() { Width = 60, Height = 60, Location = new Point(20, 20), SizeMode = PictureBoxSizeMode.Zoom };
+                        try
+                        {
+                            pictureBox.Load(confirmation.Icon);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("Failed to load avatar: " + ex.Message);
+                        }
+                        panel.Controls.Add(pictureBox);
+                    }
+
+                    Label nameLabel = new Label()
+                    {
+                        Text = $"{confirmation.Headline}\n{confirmation.Creator.ToString()}",
+                        AutoSize = true,
+                        ForeColor = Color.Snow,
+                        Location = new Point(90, 20),
+                        BackColor = Color.Transparent
+                    };
+                    panel.Controls.Add(nameLabel);
+
+                    ConfirmationButton acceptButton = new ConfirmationButton()
+                    {
+                        Text = confirmation.Accept,
+                        Location = new Point(90, 50),
+                        FlatStyle = FlatStyle.Flat,
+                        FlatAppearance = { BorderSize = 0 },
+                        BackColor = Color.Black,
+                        ForeColor = Color.Snow,
+                        Confirmation = confirmation
+                    };
+                    acceptButton.Click += btnAccept_Click;
+                    panel.Controls.Add(acceptButton);
+
+                    ConfirmationButton cancelButton = new ConfirmationButton()
+                    {
+                        Text = confirmation.Cancel,
+                        Location = new Point(180, 50),
+                        FlatStyle = FlatStyle.Flat,
+                        FlatAppearance = { BorderSize = 0 },
+                        BackColor = Color.Black,
+                        ForeColor = Color.Snow,
+                        Confirmation = confirmation
+                    };
+                    cancelButton.Click += btnCancel_Click;
+                    panel.Controls.Add(cancelButton);
+
+                    Label summaryLabel = new Label()
+                    {
+                        Text = String.Join("\n", confirmation.Summary),
+                        AutoSize = true,
+                        ForeColor = Color.Snow,
+                        Location = new Point(90, 80),
+                        BackColor = Color.Transparent
+                    };
+                    panel.Controls.Add(summaryLabel);
+
+                    this.splitContainer1.Panel2.Controls.Add(panel);
+                }
+            }
+            catch (Exception ex)
+            {
+                Label errorLabel = new Label() { Text = "Something went wrong:\n" + ex.Message, AutoSize = true, ForeColor = Color.Red, Location = new Point(20, 20) };
+                this.splitContainer1.Panel2.Controls.Add(errorLabel);
             }
         }
 
-        private void btnRefresh_Click(object sender, EventArgs e)
+        private async void btnAccept_Click(object sender, EventArgs e)
         {
-            browser.Load(steamAccount.GenerateConfirmationURL());
+            var button = (ConfirmationButton)sender;
+            var confirmation = button.Confirmation;
+            bool result = await steamAccount.AcceptConfirmation(confirmation);
+
+            await this.LoadData();
         }
 
-        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        private async void btnCancel_Click(object sender, EventArgs e)
         {
-            bool bHandled = false;
-            switch (keyData)
-            {
-                case Keys.F5:
-                    browser.Load(steamAccount.GenerateConfirmationURL());
-                    bHandled = true;
-                    break;
-                case Keys.F1:
-                    browser.ShowDevTools();
-                    bHandled = true;
-                    break;
-            }
-            return bHandled;
+            var button = (ConfirmationButton)sender;
+            var confirmation = button.Confirmation;
+            bool result = await steamAccount.DenyConfirmation(confirmation);
+
+            await this.LoadData();
+        }
+
+
+        private async void btnRefresh_Click(object sender, EventArgs e)
+        {
+            this.btnRefresh.Enabled = false;
+            this.btnRefresh.Text = "Refreshing...";
+
+            await this.LoadData();
+
+            this.btnRefresh.Enabled = true;
+            this.btnRefresh.Text = "Refresh";
+        }
+
+        private async void ConfirmationFormWeb_Shown(object sender, EventArgs e)
+        {
+            this.btnRefresh.Enabled = false;
+            this.btnRefresh.Text = "Refreshing...";
+
+            await this.LoadData();
+
+            this.btnRefresh.Enabled = true;
+            this.btnRefresh.Text = "Refresh";
         }
     }
 }

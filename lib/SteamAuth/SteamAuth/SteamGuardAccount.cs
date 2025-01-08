@@ -1,7 +1,7 @@
 ﻿using Newtonsoft.Json;
 using System;
-using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -55,31 +55,34 @@ namespace SteamAuth
 
         private static byte[] steamGuardCodeTranslations = new byte[] { 50, 51, 52, 53, 54, 55, 56, 57, 66, 67, 68, 70, 71, 72, 74, 75, 77, 78, 80, 81, 82, 84, 86, 87, 88, 89 };
 
-        public bool DeactivateAuthenticator(int scheme = 2)
+        /// <summary>
+        /// Remove steam guard from this account
+        /// </summary>
+        /// <param name="scheme">1 = Return to email codes, 2 = Remove completley</param>
+        /// <returns></returns>
+        public async Task<bool> DeactivateAuthenticator(int scheme = 1)
         {
-            var postData = new NameValueCollection();
-            postData.Add("steamid", this.Session.SteamID.ToString());
-            postData.Add("steamguard_scheme", scheme.ToString());
-            postData.Add("revocation_code", this.RevocationCode);
-            postData.Add("access_token", this.Session.OAuthToken);
+            var postBody = new NameValueCollection();
+            postBody.Add("revocation_code", this.RevocationCode);
+            postBody.Add("revocation_reason", "1");
+            postBody.Add("steamguard_scheme", scheme.ToString());
+            string response = await SteamWeb.POSTRequest("https://api.steampowered.com/ITwoFactorService/RemoveAuthenticator/v1?access_token=" + this.Session.AccessToken, null, postBody);
 
-            try
-            {
-                string response = SteamWeb.MobileLoginRequest(APIEndpoints.STEAMAPI_BASE + "/ITwoFactorService/RemoveAuthenticator/v0001", "POST", postData);
-                var removeResponse = JsonConvert.DeserializeObject<RemoveAuthenticatorResponse>(response);
+            // Parse to object
+            var removeResponse = JsonConvert.DeserializeObject<RemoveAuthenticatorResponse>(response);
 
-                if (removeResponse == null || removeResponse.Response == null || !removeResponse.Response.Success) return false;
-                return true;
-            }
-            catch (Exception)
-            {
-                return false;
-            }
+            if (removeResponse == null || removeResponse.Response == null || !removeResponse.Response.Success) return false;
+            return true;
         }
 
         public string GenerateSteamGuardCode()
         {
             return GenerateSteamGuardCodeForTime(TimeAligner.GetSteamTime());
+        }
+
+        public async Task<string> GenerateSteamGuardCodeAsync()
+        {
+            return GenerateSteamGuardCodeForTime(await TimeAligner.GetSteamTimeAsync());
         }
 
         public string GenerateSteamGuardCodeForTime(long time)
@@ -126,64 +129,32 @@ namespace SteamAuth
         public Confirmation[] FetchConfirmations()
         {
             string url = this.GenerateConfirmationURL();
-
-            CookieContainer cookies = new CookieContainer();
-            this.Session.AddCookies(cookies);
-
-            string response = SteamWeb.Request(url, "GET", "", cookies);
+            string response = SteamWeb.GETRequest(url, this.Session.GetCookies()).Result;
             return FetchConfirmationInternal(response);
         }
 
         public async Task<Confirmation[]> FetchConfirmationsAsync()
         {
             string url = this.GenerateConfirmationURL();
-
-            CookieContainer cookies = new CookieContainer();
-            this.Session.AddCookies(cookies);
-
-            string response = await SteamWeb.RequestAsync(url, "GET", null, cookies);
+            string response = await SteamWeb.GETRequest(url, this.Session.GetCookies());
             return FetchConfirmationInternal(response);
         }
 
         private Confirmation[] FetchConfirmationInternal(string response)
         {
+            var confirmationsResponse = JsonConvert.DeserializeObject<ConfirmationsResponse>(response);
 
-            /*So you're going to see this abomination and you're going to be upset.
-              It's understandable. But the thing is, regex for HTML -- while awful -- makes this way faster than parsing a DOM, plus we don't need another library.
-              And because the data is always in the same place and same format... It's not as if we're trying to naturally understand HTML here. Just extract strings.
-              I'm sorry. */
-
-            Regex confRegex = new Regex("<div class=\"mobileconf_list_entry\" id=\"conf[0-9]+\" data-confid=\"(\\d+)\" data-key=\"(\\d+)\" data-type=\"(\\d+)\" data-creator=\"(\\d+)\"");
-
-            if (response == null || !confRegex.IsMatch(response))
+            if (!confirmationsResponse.Success)
             {
-                if (response == null || !response.Contains("<div>Nothing to confirm</div>"))
-                {
-                    throw new WGTokenInvalidException();
-                }
-
-                return new Confirmation[0];
+                throw new Exception(confirmationsResponse.Message);
             }
 
-            MatchCollection confirmations = confRegex.Matches(response);
-
-            List<Confirmation> ret = new List<Confirmation>();
-            foreach (Match confirmation in confirmations)
+            if (confirmationsResponse.NeedAuthentication)
             {
-                if (confirmation.Groups.Count != 5) continue;
-
-                if (!ulong.TryParse(confirmation.Groups[1].Value, out ulong confID) ||
-                    !ulong.TryParse(confirmation.Groups[2].Value, out ulong confKey) ||
-                    !int.TryParse(confirmation.Groups[3].Value, out int confType) ||
-                    !ulong.TryParse(confirmation.Groups[4].Value, out ulong confCreator))
-                {
-                    continue;
-                }
-
-                ret.Add(new Confirmation(confID, confKey, confType, confCreator));
+                throw new Exception("Needs Authentication");
             }
 
-            return ret.ToArray();
+            return confirmationsResponse.Confirmations;
         }
 
         /// <summary>
@@ -193,166 +164,69 @@ namespace SteamAuth
         /// <returns>The Creator field of conf</returns>
         public long GetConfirmationTradeOfferID(Confirmation conf)
         {
-            if (conf.ConfType != Confirmation.ConfirmationType.Trade)
+            if (conf.ConfType != Confirmation.EMobileConfirmationType.Trade)
                 throw new ArgumentException("conf must be a trade confirmation.");
 
             return (long)conf.Creator;
         }
 
-        public bool AcceptMultipleConfirmations(Confirmation[] confs)
+        public async Task<bool> AcceptMultipleConfirmations(Confirmation[] confs)
         {
-            return _sendMultiConfirmationAjax(confs, "allow");
+            return await _sendMultiConfirmationAjax(confs, "allow");
         }
 
-        public bool DenyMultipleConfirmations(Confirmation[] confs)
+        public async Task<bool> DenyMultipleConfirmations(Confirmation[] confs)
         {
-            return _sendMultiConfirmationAjax(confs, "cancel");
+            return await _sendMultiConfirmationAjax(confs, "cancel");
         }
 
-        public bool AcceptConfirmation(Confirmation conf)
+        public async Task<bool> AcceptConfirmation(Confirmation conf)
         {
-            return _sendConfirmationAjax(conf, "allow");
+            return await _sendConfirmationAjax(conf, "allow");
         }
 
-        public bool DenyConfirmation(Confirmation conf)
+        public async Task<bool> DenyConfirmation(Confirmation conf)
         {
-            return _sendConfirmationAjax(conf, "cancel");
+            return await _sendConfirmationAjax(conf, "cancel");
         }
 
-        /// <summary>
-        /// Refreshes the Steam session. Necessary to perform confirmations if your session has expired or changed.
-        /// </summary>
-        /// <returns></returns>
-        public bool RefreshSession()
-        {
-            string url = APIEndpoints.MOBILEAUTH_GETWGTOKEN;
-            NameValueCollection postData = new NameValueCollection();
-            postData.Add("access_token", this.Session.OAuthToken);
-
-            string response = null;
-            try
-            {
-                response = SteamWeb.Request(url, "POST", postData);
-            }
-            catch (WebException)
-            {
-                return false;
-            }
-
-            if (response == null) return false;
-
-            try
-            {
-                var refreshResponse = JsonConvert.DeserializeObject<RefreshSessionDataResponse>(response);
-                if (refreshResponse == null || refreshResponse.Response == null || String.IsNullOrEmpty(refreshResponse.Response.Token))
-                    return false;
-
-                string token = this.Session.SteamID + "%7C%7C" + refreshResponse.Response.Token;
-                string tokenSecure = this.Session.SteamID + "%7C%7C" + refreshResponse.Response.TokenSecure;
-
-                this.Session.SteamLogin = token;
-                this.Session.SteamLoginSecure = tokenSecure;
-                return true;
-            }
-            catch (Exception)
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Refreshes the Steam session. Necessary to perform confirmations if your session has expired or changed.
-        /// </summary>
-        /// <returns></returns>
-        public async Task<bool> RefreshSessionAsync()
-        {
-            string url = APIEndpoints.MOBILEAUTH_GETWGTOKEN;
-            NameValueCollection postData = new NameValueCollection();
-            postData.Add("access_token", this.Session.OAuthToken);
-
-            string response = null;
-            try
-            {
-                response = await SteamWeb.RequestAsync(url, "POST", postData);
-            }
-            catch (WebException)
-            {
-                return false;
-            }
-
-            if (response == null) return false;
-
-            try
-            {
-                var refreshResponse = JsonConvert.DeserializeObject<RefreshSessionDataResponse>(response);
-                if (refreshResponse == null || refreshResponse.Response == null || String.IsNullOrEmpty(refreshResponse.Response.Token))
-                    return false;
-
-                string token = this.Session.SteamID + "%7C%7C" + refreshResponse.Response.Token;
-                string tokenSecure = this.Session.SteamID + "%7C%7C" + refreshResponse.Response.TokenSecure;
-
-                this.Session.SteamLogin = token;
-                this.Session.SteamLoginSecure = tokenSecure;
-                return true;
-            }
-            catch (Exception)
-            {
-                return false;
-            }
-        }
-
-        private ConfirmationDetailsResponse _getConfirmationDetails(Confirmation conf)
-        {
-            string url = APIEndpoints.COMMUNITY_BASE + "/mobileconf/details/" + conf.ID + "?";
-            string queryString = GenerateConfirmationQueryParams("details");
-            url += queryString;
-
-            CookieContainer cookies = new CookieContainer();
-            this.Session.AddCookies(cookies);
-            string referer = GenerateConfirmationURL();
-
-            string response = SteamWeb.Request(url, "GET", "", cookies, null);
-            if (String.IsNullOrEmpty(response)) return null;
-
-            var confResponse = JsonConvert.DeserializeObject<ConfirmationDetailsResponse>(response);
-            if (confResponse == null) return null;
-            return confResponse;
-        }
-
-        private bool _sendConfirmationAjax(Confirmation conf, string op)
+        private async Task<bool> _sendConfirmationAjax(Confirmation conf, string op)
         {
             string url = APIEndpoints.COMMUNITY_BASE + "/mobileconf/ajaxop";
             string queryString = "?op=" + op + "&";
-            queryString += GenerateConfirmationQueryParams(op);
+            // tag is different from op now
+            string tag = op == "allow" ? "accept" : "reject";
+            queryString += GenerateConfirmationQueryParams(tag);
             queryString += "&cid=" + conf.ID + "&ck=" + conf.Key;
             url += queryString;
 
-            CookieContainer cookies = new CookieContainer();
-            this.Session.AddCookies(cookies);
-            string referer = GenerateConfirmationURL();
-
-            string response = SteamWeb.Request(url, "GET", "", cookies, null);
+            string response = await SteamWeb.GETRequest(url, this.Session.GetCookies());
             if (response == null) return false;
 
             SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response);
             return confResponse.Success;
         }
 
-        private bool _sendMultiConfirmationAjax(Confirmation[] confs, string op)
+        private async Task<bool> _sendMultiConfirmationAjax(Confirmation[] confs, string op)
         {
             string url = APIEndpoints.COMMUNITY_BASE + "/mobileconf/multiajaxop";
-
-            string query = "op=" + op + "&" + GenerateConfirmationQueryParams(op);
+            // tag is different from op now
+            string tag = op == "allow" ? "accept" : "reject";
+            string query = "op=" + op + "&" + GenerateConfirmationQueryParams(tag);
             foreach (var conf in confs)
             {
                 query += "&cid[]=" + conf.ID + "&ck[]=" + conf.Key;
             }
 
-            CookieContainer cookies = new CookieContainer();
-            this.Session.AddCookies(cookies);
-            string referer = GenerateConfirmationURL();
-
-            string response = SteamWeb.Request(url, "POST", query, cookies, null);
+            string response;
+            using (CookieAwareWebClient wc = new CookieAwareWebClient())
+            {
+                wc.Encoding = Encoding.UTF8;
+                wc.CookieContainer = this.Session.GetCookies();
+                wc.Headers[HttpRequestHeader.UserAgent] = SteamWeb.MOBILE_APP_USER_AGENT;
+                wc.Headers[HttpRequestHeader.ContentType] = "application/x-www-form-urlencoded; charset=UTF-8";
+                response = await wc.UploadStringTaskAsync(new Uri(url), "POST", query);
+            }
             if (response == null) return false;
 
             SendConfirmationResponse confResponse = JsonConvert.DeserializeObject<SendConfirmationResponse>(response);
@@ -361,7 +235,7 @@ namespace SteamAuth
 
         public string GenerateConfirmationURL(string tag = "conf")
         {
-            string endpoint = APIEndpoints.COMMUNITY_BASE + "/mobileconf/conf?";
+            string endpoint = APIEndpoints.COMMUNITY_BASE + "/mobileconf/getlist?";
             string queryString = GenerateConfirmationQueryParams(tag);
             return endpoint + queryString;
         }
@@ -373,7 +247,7 @@ namespace SteamAuth
 
             var queryParams = GenerateConfirmationQueryParamsAsNVC(tag);
 
-            return "p=" + queryParams["p"] + "&a=" + queryParams["a"] + "&k=" + queryParams["k"] + "&t=" + queryParams["t"] + "&m=android&tag=" + queryParams["tag"];
+            return string.Join("&", queryParams.AllKeys.Select(key => $"{key}={queryParams[key]}"));
         }
 
         public NameValueCollection GenerateConfirmationQueryParamsAsNVC(string tag)
@@ -388,7 +262,7 @@ namespace SteamAuth
             ret.Add("a", this.Session.SteamID.ToString());
             ret.Add("k", _generateConfirmationHashForTime(time, tag));
             ret.Add("t", time.ToString());
-            ret.Add("m", "android");
+            ret.Add("m", "react");
             ret.Add("tag", tag);
 
             return ret;
@@ -450,20 +324,6 @@ namespace SteamAuth
         {
         }
 
-        private class RefreshSessionDataResponse
-        {
-            [JsonProperty("response")]
-            public RefreshSessionDataInternalResponse Response { get; set; }
-            internal class RefreshSessionDataInternalResponse
-            {
-                [JsonProperty("token")]
-                public string Token { get; set; }
-
-                [JsonProperty("token_secure")]
-                public string TokenSecure { get; set; }
-            }
-        }
-
         private class RemoveAuthenticatorResponse
         {
             [JsonProperty("response")]
@@ -473,6 +333,9 @@ namespace SteamAuth
             {
                 [JsonProperty("success")]
                 public bool Success { get; set; }
+
+                [JsonProperty("revocation_attempts_remaining")]
+                public int RevocationAttemptsRemaining { get; set; }
             }
         }
 

@@ -45,8 +45,9 @@ namespace Steam_Desktop_Authenticator
             }
 
             // Parse command line arguments
-            var options = new CommandLineOptions();
-            Parser.Default.ParseArguments(args, options);
+            CommandLineOptions options = new();
+            Parser.Default.ParseArguments<CommandLineOptions>(args)
+                .WithParsed(o => options = o);
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -69,16 +70,16 @@ namespace Steam_Desktop_Authenticator
                 {
                     // An maFile was encrypted, we're fucked.
                     MessageBox.Show("Sorry, but SDA was unable to recover your accounts since you used encryption.\nYou'll need to recover your Steam accounts by removing the authenticator.\nClick OK to view instructions.", "Steam Desktop Authenticator", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    System.Diagnostics.Process.Start(@"https://github.com/Jessecar96/SteamDesktopAuthenticator/wiki/Help!-I'm-locked-out-of-my-account");
+                    Process.Start(@"https://github.com/Jessecar96/SteamDesktopAuthenticator/wiki/Help!-I'm-locked-out-of-my-account");
                     return;
                 }
             }
 
+            // Warning that this software is no longer supported
+            MessageBox.Show("Steam Desktop Authenticator is no longer supported and will not receive any more updates. You should only use Steam's official mobile app to login to your account. Using SDA or any other tool is dangerous and puts your account at risk.", "Steam Desktop Authenticator", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+
             if (man.FirstRun)
             {
-                // Install VC++ Redist and wait
-                new InstallRedistribForm().ShowDialog();
-
                 if (man.Entries.Count > 0)
                 {
                     // Already has accounts, just run
